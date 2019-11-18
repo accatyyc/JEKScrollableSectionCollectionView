@@ -7,11 +7,12 @@
 //
 
 #import "JEKScrollableSectionCollectionViewLayout.h"
+#import <objc/runtime.h>
 
 static NSString * const JEKScrollableCollectionViewLayoutScrollViewKind = @"JEKScrollableCollectionViewLayoutScrollViewKind";
 NSString * const JEKCollectionElementKindSectionBackground = @"JEKCollectionElementKindSectionBackground";
 
-@class JEKScrollableSectionInfo;
+@class JEKScrollableSectionInfo, JEKScrollableSectionDecorationView;
 
 @interface JEKScrollableSectionDecorationViewLayoutAttributes : UICollectionViewLayoutAttributes
 @property (nonatomic, strong) JEKScrollableSectionInfo *section;
@@ -19,6 +20,7 @@ NSString * const JEKCollectionElementKindSectionBackground = @"JEKCollectionElem
 
 @interface JEKScrollableSectionInfo : NSObject
 @property (nonatomic, weak) JEKScrollableSectionCollectionViewLayout *layout;
+@property (nonatomic, weak) JEKScrollableSectionDecorationView *currentDecorationView; // Will be set when only when section is visible
 @property (nonatomic, assign) CGPoint offset;
 @property (nonatomic, assign) CGFloat interItemSpacing;
 @property (nonatomic, assign) UIEdgeInsets insets;
@@ -135,7 +137,7 @@ NSString * const JEKCollectionElementKindSectionBackground = @"JEKCollectionElem
             section.headerSize = [self headerSizeForSection:index];
             section.footerSize = [self footerSizeForSection:index];
             section.numberOfItems = [self.collectionView numberOfItemsInSection:index];
-            section.shouldUseFlowLayout = [self shouldUseFlowLayoutInSection: index];
+            section.shouldUseFlowLayout = [self shouldUseFlowLayoutInSection:index];
             NSMutableArray<NSValue *> *itemSizes = [NSMutableArray new];
             for (NSInteger item = 0; item < section.numberOfItems; ++item) {
                 CGSize itemSize = [self itemSizeForIndexPath:[NSIndexPath indexPathForItem:item inSection:section.index]];
@@ -250,6 +252,58 @@ NSString * const JEKCollectionElementKindSectionBackground = @"JEKCollectionElem
     return context;
 }
 
+/**
+ Offsets a horizontal section to accomodate for scrollToItemAtIndexPath:.
+ This function has to have special handling since UICollectionView doesn't expect
+ that there can be cells outside the scrollable bounds.
+ */
+- (void)scrollToItemAtIndexPath:(NSIndexPath *)targetIndexPath scrollPosition:(UICollectionViewScrollPosition)scrollPosition animated:(BOOL)animated
+{
+    JEKScrollableSectionInfo *section = self.sections[targetIndexPath.section];
+
+    // We can't offset a flow layout section horizontally
+    if (section.shouldUseFlowLayout) {
+        return;
+    }
+
+    CGRect itemFrame = [section layoutAttributesForItemAtIndex:targetIndexPath.item].frame;
+
+    CGRect targetFrame = itemFrame;
+    if (scrollPosition & UICollectionViewScrollPositionCenteredHorizontally) {
+        targetFrame.origin.x = self.collectionViewContentSize.width / 2.0 - targetFrame.size.width / 2.0;
+    } else if (scrollPosition & UICollectionViewScrollPositionRight) {
+        targetFrame.origin.x = (self.collectionViewContentSize.width - targetFrame.size.width) - 10.0;
+    } else if (scrollPosition & UICollectionViewScrollPositionLeft) {
+        targetFrame.origin.x = 10.0;
+    }
+
+    CGFloat horizontalOffsetDifference = targetFrame.origin.x - itemFrame.origin.x;
+    CGFloat newSectionOffset = section.offset.x - horizontalOffsetDifference;
+    [self setHorizontalOffset:newSectionOffset forSection:section animated:animated];
+}
+
+- (void)setHorizontalOffset:(CGFloat)offset forSectionAtIndex:(NSUInteger)index animated:(BOOL)animated
+{
+    [self setHorizontalOffset:offset forSection:self.sections[index] animated:animated];
+}
+
+- (void)setHorizontalOffset:(CGFloat)offset forSection:(JEKScrollableSectionInfo *)section animated:(BOOL)animated
+{
+    self.offsetCache[@(section.index)] = @(-offset);
+
+    // If the section is visible, we can use its scrollview to handle the animation for us
+    if (animated && section.currentDecorationView) {
+        [section.currentDecorationView.scrollView setContentOffset:CGPointMake(offset, 0) animated:YES];
+    }
+
+    // Otherwise, invalidate the layout
+    else {
+        JEKScrollableSectionLayoutInvalidationContext *invalidationContext = [JEKScrollableSectionLayoutInvalidationContext new];
+        invalidationContext.invalidatedSection = section;
+        [self invalidateLayoutWithContext:invalidationContext];
+    }
+}
+
 #define DELEGATE_RESPONDS_TO_SELECTOR(SEL) ([self.collectionView.delegate conformsToProtocol:@protocol(JEKCollectionViewDelegateScrollableSectionLayout)] &&\
                                             [self.collectionView.delegate respondsToSelector:SEL])
 #define DELEGATE (id<JEKCollectionViewDelegateScrollableSectionLayout>)self.collectionView.delegate
@@ -267,11 +321,7 @@ NSString * const JEKCollectionElementKindSectionBackground = @"JEKCollectionElem
 - (void)scrollViewDidScroll:(UIScrollView *)scrollView
 {
     NSUInteger section = scrollView.tag;
-    self.offsetCache[@(section)] = @(-scrollView.contentOffset.x);
-
-    JEKScrollableSectionLayoutInvalidationContext *invalidationContext = [JEKScrollableSectionLayoutInvalidationContext new];
-    invalidationContext.invalidatedSection = self.sections[section];
-    [self invalidateLayoutWithContext:invalidationContext];
+    [self setHorizontalOffset:scrollView.contentOffset.x forSectionAtIndex:section animated:NO];
 
     if (DELEGATE_RESPONDS_TO_SELECTOR(@selector(collectionView:layout:section:didScrollToOffset:))) {
         [DELEGATE collectionView:self.collectionView layout:self section:section didScrollToOffset:scrollView.contentOffset.x];
@@ -395,6 +445,7 @@ NSString * const JEKCollectionElementKindSectionBackground = @"JEKCollectionElem
 {
     [super applyLayoutAttributes:layoutAttributes];
     self.section = layoutAttributes.section;
+    self.section.currentDecorationView = self;
     self.scrollView.tag = layoutAttributes.indexPath.section;
     [self applyScrollViewConfiguration:[self.section.layout scrollViewConfigurationForSection:layoutAttributes.indexPath.section]];
     [self.scrollView setContentOffset:CGPointMake(-layoutAttributes.section.offset.x, 0.0) animated:NO];
@@ -615,6 +666,13 @@ NSString * const JEKCollectionElementKindSectionBackground = @"JEKCollectionElem
     return intersectingAttributes;
 }
 
+- (JEKScrollableSectionDecorationView *)currentDecorationView
+{
+    // Make sure we can't access old references to decoration views from sections that aren't visible, since
+    // they may be in the reuse queue and not in correct state
+    return _currentDecorationView.superview ? _currentDecorationView : nil;
+}
+
 @end
 
 @implementation JEKScrollViewConfiguration
@@ -642,3 +700,34 @@ NSString * const JEKCollectionElementKindSectionBackground = @"JEKCollectionElem
 @end
 
 @implementation JEKScrollableSectionLayoutInvalidationContext @end
+
+
+/**
+ A UICollectionView-swizzle that forwards calls to scrollToItemAtIndexPath:atScrollPosition:animated:
+ to the layout object. This is needed since this layout must scroll horizontal sections for these
+ calls to work correctly.
+ */
+@interface UICollectionView (JEKScrollableSectionLayoutCollectionViewLayout) @end
+
+@implementation UICollectionView (JEKScrollableSectionLayoutCollectionViewLayout)
+
++ (void)load
+{
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Method original = class_getInstanceMethod(self, @selector(scrollToItemAtIndexPath:atScrollPosition:animated:));
+        Method hook = class_getInstanceMethod(self, @selector(jek_scrollToItemAtIndexPath:atScrollPosition:animated:));
+        method_exchangeImplementations(original, hook);
+    });
+}
+
+- (void)jek_scrollToItemAtIndexPath:(NSIndexPath *)indexPath atScrollPosition:(UICollectionViewScrollPosition)scrollPosition animated:(BOOL)animated
+{
+    [self jek_scrollToItemAtIndexPath:indexPath atScrollPosition:scrollPosition animated:animated];
+    if ([self.collectionViewLayout isKindOfClass:JEKScrollableSectionCollectionViewLayout.class]) {
+        JEKScrollableSectionCollectionViewLayout *layout = (JEKScrollableSectionCollectionViewLayout *)self.collectionViewLayout;
+        [layout scrollToItemAtIndexPath:indexPath scrollPosition:scrollPosition animated:animated];
+    }
+}
+
+@end

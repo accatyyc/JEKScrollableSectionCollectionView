@@ -35,6 +35,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) BOOL showsSectionBackgrounds;
 extern NSString * const JEKCollectionElementKindSectionBackground;
 
+/**
+ Allows you to programmatically scroll a section.
+ */
+- (void)setHorizontalOffset:(CGFloat)offset forSectionAtIndex:(NSUInteger)index animated:(BOOL)animated;
+
 @end
 
 @interface JEKScrollViewConfiguration : NSObject

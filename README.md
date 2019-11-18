@@ -15,7 +15,7 @@ and you have to set the measurements in code. Check the example project for a fu
 - Properly supports inserts/deletes/moves (even between different sections)
   - ... since it does not create multiple `UICollectionView`s like this problem is normally solved
 - (almost) drop in replacement for `UICollectionViewFlowLayout`
-- A simple layout object - doesn't need to subclass or modify `UICollectionView` in any way
+- A simple layout object - doesn't need to subclass `UICollectionView`
   - ... leading to efficient reuse of cells and support for prefetching
 - Section background views (as optional supplementary views)
 
